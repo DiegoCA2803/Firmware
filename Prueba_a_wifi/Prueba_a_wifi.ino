@@ -8,7 +8,7 @@
 const char* ssid = "TU_WIFI";
 const char* password = "TU_PASSWORD_WIFI";
 
-const char* mqttHost = "api.gastio.space";
+const char* mqttHost = "";
 const int mqttPort = 8883;
 const char* mqttUser = "TU_USUARIO_MQTT";
 const char* mqttPassword = "TU_PASSWORD_MQTT";
