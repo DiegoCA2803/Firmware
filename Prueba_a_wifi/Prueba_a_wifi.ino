@@ -5,13 +5,13 @@
 #include <ESP32Servo.h>
 #include <time.h>
 
-const char* ssid = "TU_WIFI";
-const char* password = "TU_PASSWORD_WIFI";
+const char* ssid = "";
+const char* password = "";
 
 const char* mqttHost = "";
-const int mqttPort = 8883;
-const char* mqttUser = "TU_USUARIO_MQTT";
-const char* mqttPassword = "TU_PASSWORD_MQTT";
+const int mqttPort = ;
+const char* mqttUser = "";
+const char* mqttPassword = "";
 
 const char* sensorId = "esp32-001";
 const char* firmwareVersion = "1.1.0";
@@ -25,8 +25,8 @@ const int pinBoton = 33;
 const int umbralAlerta = 1500;
 const int umbralSeguro = 1300;
 
-const int servoAbierto = 0;
-const int servoCerrado = 90;
+const int servoAbierto = 90;
+const int servoCerrado = 0;
 
 const int ventiladorEncendido = HIGH;
 const int ventiladorApagado = LOW;
@@ -46,6 +46,9 @@ PubSubClient mqttClient(wifiClient);
 
 bool valvulaCerradaPorGas = false;
 bool ventiladorActivo = false;
+bool ventiladorEncendidoPorBackend = false;
+bool ventiladorEncendidoPorGas = false;
+unsigned long tiempoGasDesaparecido = 0;
 bool buzzerActivo = false;
 bool wifiIniciado = false;
 
@@ -85,6 +88,16 @@ String topicStatus() {
 // Devuelve el topic MQTT donde el ESP32 escucha comandos remotos.
 String topicCommand() {
   return "sensors/" + String(sensorId) + "/command";
+}
+
+// Devuelve el topic MQTT donde el ESP32 escucha comandos de valvula.
+String topicValveCommand() {
+  return "gas/command/" + String(sensorId) + "/valve";
+}
+
+// Devuelve el topic MQTT donde el ESP32 escucha comandos de disipador.
+String topicDissipatorCommand() {
+  return "gas/command/" + String(sensorId) + "/dissipator";
 }
 
 // Devuelve el topic MQTT donde el ESP32 podría recibir configuración remota.
@@ -176,12 +189,34 @@ void aplicarLogicaLocal() {
     valvulaCerradaPorGas = true;
     cerrarValvula();
     activarBuzzer();
+    
+    // Encender ventilador debido a detección de gas
+    ventiladorEncendidoPorGas = true;
+    tiempoGasDesaparecido = 0; // Resetear temporizador de cooldown
     encenderVentilador();
     return;
   }
 
   apagarBuzzer();
-  apagarVentilador();
+
+  // Lógica de apagado diferido (cooldown de 5 segundos)
+  if (ventiladorEncendidoPorGas) {
+    if (tiempoGasDesaparecido == 0) {
+      tiempoGasDesaparecido = millis(); // Registrar cuándo desapareció el gas
+    }
+    
+    if (millis() - tiempoGasDesaparecido >= 5000) {
+      ventiladorEncendidoPorGas = false;
+      tiempoGasDesaparecido = 0;
+      if (!ventiladorEncendidoPorBackend) {
+        apagarVentilador();
+      }
+    }
+  } else {
+    if (!ventiladorEncendidoPorBackend) {
+      apagarVentilador();
+    }
+  }
 
   if (valvulaCerradaPorGas) {
     cerrarValvula();
@@ -204,6 +239,11 @@ void revisarBoton() {
         valvulaCerradaPorGas = false;
         abrirValvula();
         apagarBuzzer();
+        
+        // Resetear estados del ventilador
+        ventiladorEncendidoPorBackend = false;
+        ventiladorEncendidoPorGas = false;
+        tiempoGasDesaparecido = 0;
         apagarVentilador();
 
         Serial.println("Sistema reiniciado: valvula ABIERTA");
@@ -418,6 +458,7 @@ void ejecutarComando(String command, String action) {
     valvulaCerradaPorGas = true;
     cerrarValvula();
     activarBuzzer();
+    ventiladorEncendidoPorBackend = true;
     encenderVentilador();
     Serial.println("Comando panic: valvula cerrada y ventilador encendido");
     return;
@@ -427,6 +468,7 @@ void ejecutarComando(String command, String action) {
     valvulaCerradaPorGas = true;
     cerrarValvula();
     activarBuzzer();
+    ventiladorEncendidoPorBackend = true;
     encenderVentilador();
     Serial.println("Comando MQTT: valvula cerrada");
     return;
@@ -437,6 +479,11 @@ void ejecutarComando(String command, String action) {
       valvulaCerradaPorGas = false;
       abrirValvula();
       apagarBuzzer();
+      
+      // Al reabrir de forma segura, apagamos ventilador si no hay alarma de gas activa
+      ventiladorEncendidoPorBackend = false;
+      ventiladorEncendidoPorGas = false;
+      tiempoGasDesaparecido = 0;
       apagarVentilador();
       Serial.println("Comando MQTT: valvula abierta");
     } else {
@@ -447,13 +494,17 @@ void ejecutarComando(String command, String action) {
   }
 
   if (command == "dissipator_control" && action == "activate") {
+    ventiladorEncendidoPorBackend = true;
     encenderVentilador();
     Serial.println("Comando MQTT: ventilador encendido");
     return;
   }
 
   if (command == "dissipator_control" && action == "deactivate") {
+    ventiladorEncendidoPorBackend = false;
     if (ambienteSeguro()) {
+      ventiladorEncendidoPorGas = false;
+      tiempoGasDesaparecido = 0;
       apagarVentilador();
       Serial.println("Comando MQTT: ventilador apagado");
     } else {
@@ -464,13 +515,17 @@ void ejecutarComando(String command, String action) {
   }
 
   if (command == "on") {
+    ventiladorEncendidoPorBackend = true;
     encenderVentilador();
     Serial.println("Comando compatible: ventilador encendido");
     return;
   }
 
   if (command == "off") {
+    ventiladorEncendidoPorBackend = false;
     if (ambienteSeguro()) {
+      ventiladorEncendidoPorGas = false;
+      tiempoGasDesaparecido = 0;
       apagarVentilador();
       Serial.println("Comando compatible: ventilador apagado");
     } else {
@@ -497,8 +552,29 @@ void recibirMqtt(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
-  String command = doc["command"] | "";
-  String action = doc["action"] | "";
+  String topicStr = String(topic);
+  String command = "";
+  String action = "";
+
+  if (topicStr.endsWith("/valve")) {
+    command = "valve_control";
+    action = doc["command"] | doc["action"] | "";
+  } else if (topicStr.endsWith("/dissipator")) {
+    command = "dissipator_control";
+    String state = doc["state"] | doc["command"] | doc["action"] | "";
+    state.toLowerCase();
+    if (state == "on" || state == "activate" || state == "active") {
+      action = "activate";
+    } else if (state == "off" || state == "deactivate" || state == "inactive") {
+      action = "deactivate";
+    } else {
+      action = state;
+    }
+  } else {
+    // Canal de comandos antiguo o genérico
+    command = doc["command"] | doc["state"] | "";
+    action = doc["action"] | "";
+  }
 
   ejecutarComando(command, action);
 }
@@ -524,10 +600,15 @@ void conectarMqtt() {
     Serial.println("MQTT conectado correctamente");
 
     mqttClient.subscribe(topicCommand().c_str());
+    mqttClient.subscribe(topicValveCommand().c_str());
+    mqttClient.subscribe(topicDissipatorCommand().c_str());
     mqttClient.subscribe(topicConfig().c_str());
 
-    Serial.print("Suscrito a: ");
-    Serial.println(topicCommand());
+    Serial.println("Suscrito a los canales de comandos y configuracion:");
+    Serial.print(" - "); Serial.println(topicCommand());
+    Serial.print(" - "); Serial.println(topicValveCommand());
+    Serial.print(" - "); Serial.println(topicDissipatorCommand());
+    Serial.print(" - "); Serial.println(topicConfig());
 
     configTime(0, 0, "pool.ntp.org", "time.nist.gov");
 
